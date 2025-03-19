@@ -9,7 +9,7 @@ import emoji
 from gensim.models.phrases import Phrases, Phraser
 import logging
 import spacy
-import emoji
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # Configure logging (adjust level as needed)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,6 +20,32 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 
 stop_words = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
+
+def clean_instagram_comment(text):
+    """
+    Clean Instagram comment text for sentiment analysis.
+    
+    Steps:
+    - Remove URLs.
+    - Remove user mentions.
+    - Convert hashtags by stripping the '#' symbol.
+    - Convert emojis to their textual descriptions.
+    - Normalize repeated punctuation and extra whitespace.
+    """
+    # Remove URLs
+    text = re.sub(r"http\S+|www\.\S+", "", text)
+    # Remove user mentions (e.g., @username)
+    text = re.sub(r"@\w+", "", text)
+    # Normalize hashtags (remove '#' but keep the text)
+    text = re.sub(r"#(\w+)", r"\1", text)
+    # Convert emojis to text (e.g., 😊 becomes :smiling_face:)
+    text = emoji.demojize(text, delimiters=(" ", " "))
+    # Normalize repeated punctuation (e.g., "!!!" -> "!")
+    text = re.sub(r'([!?.])\1+', r'\1', text)
+    # Remove extra whitespace
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
 
 def count_words_emojis(text):
     """Counts words (ignoring emojis and punctuation) and emojis in text."""
@@ -36,8 +62,7 @@ def count_words_emojis(text):
                                '])+', flags=re.UNICODE)
 
     emojis = emoji_pattern.findall(text)
-    # emoji_count = len(emojis)  # Count the number of emoji matches (not individual characters)
-    emoji_count= emoji.emoji_count(text)
+    emoji_count = emoji.emoji_count(text)
 
     # Remove emojis from the text
     text_without_emojis = emoji_pattern.sub('', text)
@@ -52,9 +77,11 @@ def count_words_emojis(text):
     logging.debug(f"Word count: {word_count}, Emoji count: {emoji_count}")
     return word_count, emoji_count
 
-def remove_stopwords(words):
-    """Removes stop words from a list of words."""
-    logging.debug(f"Removing stop words from: {words}")
+def remove_stopwords(text):
+    """Removes stop words from a text (handles contractions)."""
+    logging.debug(f"Removing stop words from: {text}")
+    expanded_text = expand_contractions(text)  # Expand contractions before tokenization
+    words = word_tokenize(expanded_text)
     filtered_words = [word for word in words if word.lower() not in stop_words and word.isalnum()]
     logging.debug(f"Filtered words: {filtered_words}")
     return filtered_words
@@ -73,7 +100,7 @@ def lemmatize_words(words):
     logging.debug(f"Lemmatized words: {lemmatized_words}")
     return lemmatized_words
 
-def detect_phrases(sentence):
+def detect_phrases(sentence, words_filtered):
     # Load the small English model
     nlp = spacy.load('en_core_web_sm')
     # Process the sentence
@@ -101,6 +128,54 @@ def extract_handles_hashtags(text):
     logging.debug(f"Handles: {handles}, Hashtags: {hashtags}")
     return handles, hashtags
 
+def detect_sentiment_and_emotion_instagram(text):
+    """
+    Detect sentiment and emotion from an Instagram comment.
+    
+    This function:
+    - Preprocesses the comment to handle URLs, mentions, hashtags, emojis, and punctuation.
+    - Uses VADER sentiment analysis to compute sentiment scores.
+    - Determines an overall sentiment and primary emotion based on VADER's scores.
+    
+    Returns a dictionary containing the original text, cleaned text, overall sentiment,
+    primary emotion (positive, neutral, or negative), and detailed sentiment scores.
+    """
+    logging.debug(f"Original text: {text}")
+    
+    # Clean the comment text
+    cleaned_text = clean_instagram_comment(text)
+    logging.debug(f"Cleaned text: {cleaned_text}")
+    
+    # Initialize the VADER sentiment analyzer
+    analyzer = SentimentIntensityAnalyzer()
+    sentiment_scores = analyzer.polarity_scores(cleaned_text)
+    logging.debug(f"Sentiment scores: {sentiment_scores}")
+
+    # Determine overall sentiment based on compound score thresholds
+    compound = sentiment_scores['compound']
+    if compound >= 0.05:
+        sentiment = 'Positive'
+    elif compound <= -0.05:
+        sentiment = 'Negative'
+    else:
+        sentiment = 'Neutral'
+    
+    logging.debug(f"Overall sentiment: {sentiment}")
+    
+    # Determine the primary emotion from the positive, neutral, and negative scores
+    emotions = {k: sentiment_scores[k] for k in ['pos', 'neu', 'neg']}
+    primary_emotion = max(emotions, key=emotions.get)
+    
+    logging.debug(f"Primary emotion: {primary_emotion}")
+    
+    return {
+        # 'original_text': text,
+        # 'cleaned_text': cleaned_text,
+        'sentiment': sentiment,
+        'primary_emotion': primary_emotion,
+        'sentiment_scores': sentiment_scores
+    }     
+
 def process_comment(comment, phrases_model=None):
     """Processes a single comment."""
     logging.debug(f"Processing comment: {comment}")
@@ -108,10 +183,11 @@ def process_comment(comment, phrases_model=None):
         handles, hashtags = extract_handles_hashtags(comment)
         words = word_tokenize(comment)
         word_count, emoji_count = count_words_emojis(comment)
-        words_filtered = remove_stopwords(words)
+        words_filtered = remove_stopwords(comment) #passing text instead of words
         expanded_comment = expand_contractions(comment)
         lemmatized_words = lemmatize_words(words_filtered)
-        detected_phrases = detect_phrases(comment)
+        detected_phrases = detect_phrases(comment, words_filtered)  # Passing words_filtered
+        sentiment_emotion = detect_sentiment_and_emotion_instagram(comment)
 
         return pd.DataFrame({
             'comment': [comment],
@@ -122,7 +198,8 @@ def process_comment(comment, phrases_model=None):
             'filtered_words': [words_filtered],
             'expanded_comment': [expanded_comment],
             'lemmatized_words': [lemmatized_words],
-            'detected_phrases': [detected_phrases]
+            'detected_phrases': [detected_phrases],
+            'sentiment_emotion': [sentiment_emotion]
         })
     except Exception as e:
         logging.exception(f"Error processing comment: {e}") #Logs the full traceback
@@ -133,7 +210,16 @@ comments = [
     "Hey @user1, check out this awesome😃 #newproduct! 😃",
     "I don't like this product. #badquality",
     "Amazing work! @user2 and @user3, you guys rock! 💪",
-    "This is another comment with some more words and emojis 🎉🥳."
+    "This is another comment with some more words and emojis 🎉🥳.",
+    "Just received my order! 📦 It looks fantastic! #happycustomer",
+    "Can't believe how good this is! @brandname, you nailed it! 👏😍",
+    "This outfit is so stunning! Perfect for the summer vibes! 🌞🌼 #fashion",
+    "Love the aesthetics of this post! ✨✨ #photography #inspiration",
+    "So delicious! 😋 Just tried your recipe and it was a hit! #foodie",
+    "Where did you get those shoes? I need them in my life! 👟❤️",
+    "This place is beautiful! Would love to visit someday! 🏖️ #travelgoals",
+    "Your makeup looks flawless! Could you share the products? 💄✨",
+    "What a stunning view! 😍🏞️ #nature #explore",
 ]
 
 # Train phrase model if needed (requires a larger corpus for better results)

@@ -1,0 +1,7 @@
+nltk>=3.6.3
+pandas>=1.3.3
+contractions>=0.0.23
+emoji>=1.7.0
+gensim>=4.0.0
+spacy>=3.1.1
+vaderSentiment>=3.3.2
